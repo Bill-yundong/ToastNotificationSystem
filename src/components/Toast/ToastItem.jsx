@@ -1,45 +1,97 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useToast } from './ToastContext';
+import { getAnimationStyle, getHoverStyle } from './ToastScheduler';
+import CONFIG from './ToastScheduler';
 
-const ToastItem = ({ toast, index, position }) => {
-  const { dismiss } = useToast();
-  const [isVisible, setIsVisible] = useState(false);
-  const [isExiting, setIsExiting] = useState(false);
+const ToastItem = ({ toast, position }) => {
+  const { dismiss, startExitAnimation, pauseAutoDismiss, scheduleAutoDismiss, updateToastAnimation } = useToast();
+  const [isHovered, setIsHovered] = useState(false);
   const [progress, setProgress] = useState(100);
+  const [animationPhase, setAnimationPhase] = useState('entering');
+  const progressRef = useRef({ startTime: null, paused: false, pausedTime: 0, totalDuration: toast.duration });
+  const animationFrameRef = useRef(null);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsVisible(true);
-    }, 10);
-    return () => clearTimeout(timer);
-  }, []);
+    const enterTimer = setTimeout(() => {
+      setAnimationPhase('visible');
+      updateToastAnimation(toast.id, { animationState: 'visible' });
+    }, 50);
+    
+    return () => clearTimeout(enterTimer);
+  }, [toast.id, updateToastAnimation]);
+
+  useEffect(() => {
+    if (toast.animationState === 'exiting') {
+      setAnimationPhase('exiting');
+    }
+  }, [toast.animationState]);
+
+  const updateProgress = useCallback(() => {
+    if (progressRef.current.paused || toast.duration <= 0) {
+      animationFrameRef.current = requestAnimationFrame(updateProgress);
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = (now - progressRef.current.startTime) + progressRef.current.pausedTime;
+    const remaining = Math.max(0, 100 - (elapsed / progressRef.current.totalDuration) * 100);
+    
+    setProgress(remaining);
+
+    if (remaining > 0) {
+      animationFrameRef.current = requestAnimationFrame(updateProgress);
+    }
+  }, [toast.duration]);
 
   useEffect(() => {
     if (toast.duration <= 0) return;
 
-    const startTime = Date.now();
-    const duration = toast.duration;
+    progressRef.current = {
+      startTime: Date.now(),
+      paused: false,
+      pausedTime: 0,
+      totalDuration: toast.duration,
+    };
 
-    const progressInterval = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      const remaining = Math.max(0, 100 - (elapsed / duration) * 100);
-      setProgress(remaining);
+    animationFrameRef.current = requestAnimationFrame(updateProgress);
 
-      if (remaining <= 0) {
-        clearInterval(progressInterval);
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
       }
-    }, 50);
+    };
+  }, [toast.duration, updateProgress]);
 
-    return () => clearInterval(progressInterval);
-  }, [toast.duration]);
+  const handleMouseEnter = useCallback(() => {
+    setIsHovered(true);
+    progressRef.current.paused = true;
+    
+    if (toast.duration > 0) {
+      pauseAutoDismiss(toast.id);
+    }
+  }, [toast.id, toast.duration, pauseAutoDismiss]);
 
-  const handleClose = () => {
-    setIsExiting(true);
-    setIsVisible(false);
-    setTimeout(() => {
-      dismiss(toast.id);
-    }, 300);
-  };
+  const handleMouseLeave = useCallback(() => {
+    setIsHovered(false);
+    
+    if (toast.duration > 0) {
+      progressRef.current.startTime = Date.now();
+      progressRef.current.paused = false;
+      
+      const elapsed = progressRef.current.pausedTime + (Date.now() - progressRef.current.startTime);
+      const remainingTime = Math.max(0, progressRef.current.totalDuration - elapsed);
+      
+      if (remainingTime > 0) {
+        scheduleAutoDismiss(toast.id, remainingTime);
+      } else {
+        startExitAnimation(toast.id);
+      }
+    }
+  }, [toast.id, toast.duration, scheduleAutoDismiss, startExitAnimation]);
+
+  const handleClose = useCallback(() => {
+    startExitAnimation(toast.id);
+  }, [toast.id, startExitAnimation]);
 
   const getIcon = () => {
     switch (toast.type) {
@@ -79,40 +131,48 @@ const ToastItem = ({ toast, index, position }) => {
     }
   };
 
+  const layout = {
+    offsetY: toast.offsetY || 0,
+    scale: toast.scale || 1,
+    opacity: toast.opacity || 1,
+    zIndex: toast.zIndex || 9999,
+  };
+
+  const baseAnimationStyle = getAnimationStyle(toast, layout, position);
+  const hoverStyle = getHoverStyle(isHovered, layout);
+
+  const finalStyle = {
+    ...baseAnimationStyle,
+    ...hoverStyle,
+  };
+
+  if (animationPhase === 'exiting') {
+    finalStyle.transition = `all ${CONFIG.exitAnimationDuration}ms ${CONFIG.exitEasing}`;
+  }
+
   const getToastClass = () => {
     const baseClass = 'toast-item';
     const typeClass = `toast-${toast.type}`;
-    const visibilityClass = isVisible ? 'toast-visible' : 'toast-hidden';
-    const exitClass = isExiting ? 'toast-exiting' : '';
+    const stateClass = `toast-${animationPhase}`;
+    const hoverClass = isHovered ? 'toast-hovered' : '';
+    const latestClass = toast.isLatest ? 'toast-latest' : '';
 
-    return `${baseClass} ${typeClass} ${visibilityClass} ${exitClass}`.trim();
-  };
-
-  const getAnimationDelay = () => {
-    return `-${index * 0.1}s`;
+    return `${baseClass} ${typeClass} ${stateClass} ${hoverClass} ${latestClass}`.trim();
   };
 
   return (
     <div
       className={getToastClass()}
-      style={{
-        animationDelay: getAnimationDelay(),
-        zIndex: 9999 - index,
-      }}
-      onMouseEnter={() => {
-        if (toast.duration > 0) {
-          setProgress(100);
-        }
-      }}
-      onMouseLeave={() => {
-        if (toast.duration > 0) {
-          setProgress(100);
-        }
-      }}
+      style={finalStyle}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
     >
       <div className="toast-content">
         {getIcon()}
-        <div className="toast-message">{toast.message}</div>
+        <div className="toast-message-wrapper">
+          {toast.title && <div className="toast-title">{toast.title}</div>}
+          <div className="toast-message">{toast.message}</div>
+        </div>
         <button
           className="toast-close"
           onClick={handleClose}
@@ -127,7 +187,10 @@ const ToastItem = ({ toast, index, position }) => {
       {toast.duration > 0 && (
         <div
           className="toast-progress"
-          style={{ width: `${progress}%` }}
+          style={{ 
+            width: `${progress}%`,
+            transition: isHovered ? 'none' : 'width 0.05s linear'
+          }}
         />
       )}
     </div>

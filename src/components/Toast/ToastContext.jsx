@@ -1,26 +1,86 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useRef, useEffect } from 'react';
 
 const ToastContext = createContext(null);
 
+const getPriority = (type) => {
+  const priorityMap = {
+    error: 4,
+    warning: 3,
+    success: 2,
+    info: 1,
+    default: 0,
+  };
+  return priorityMap[type] || 0;
+};
+
 const toastReducer = (state, action) => {
   switch (action.type) {
-    case 'ADD_TOAST':
+    case 'ADD_TOAST': {
+      const newToast = {
+        ...action.payload,
+        createdAt: Date.now(),
+        priority: getPriority(action.payload.type),
+        animationState: 'entering',
+        offsetY: 0,
+        scale: 1,
+        opacity: 1,
+        zIndex: 0,
+      };
+      
       return {
         ...state,
-        toasts: [...state.toasts, action.payload],
+        toasts: [...state.toasts, newToast],
       };
-    case 'REMOVE_TOAST':
+    }
+    
+    case 'UPDATE_TOAST_ANIMATION': {
+      return {
+        ...state,
+        toasts: state.toasts.map(toast =>
+          toast.id === action.payload.id
+            ? { ...toast, ...action.payload.updates }
+            : toast
+        ),
+      };
+    }
+    
+    case 'UPDATE_ALL_TOASTS_LAYOUT': {
+      return {
+        ...state,
+        toasts: state.toasts.map(toast => {
+          const layout = action.payload.layouts[toast.id];
+          return layout ? { ...toast, ...layout } : toast;
+        }),
+      };
+    }
+    
+    case 'START_EXIT_ANIMATION': {
+      return {
+        ...state,
+        toasts: state.toasts.map(toast =>
+          toast.id === action.payload
+            ? { ...toast, animationState: 'exiting' }
+            : toast
+        ),
+      };
+    }
+    
+    case 'REMOVE_TOAST': {
       return {
         ...state,
         toasts: state.toasts.filter(toast => toast.id !== action.payload),
       };
-    case 'UPDATE_TOAST':
+    }
+    
+    case 'UPDATE_TOAST': {
       return {
         ...state,
         toasts: state.toasts.map(toast =>
           toast.id === action.payload.id ? { ...toast, ...action.payload.updates } : toast
         ),
       };
+    }
+    
     default:
       return state;
   }
@@ -30,9 +90,42 @@ let toastIdCounter = 0;
 
 export const ToastProvider = ({ children }) => {
   const [state, dispatch] = useReducer(toastReducer, { toasts: [] });
+  const timersRef = useRef(new Map());
+  const hoveredToastRef = useRef(null);
 
   const removeToast = useCallback((id) => {
     dispatch({ type: 'REMOVE_TOAST', payload: id });
+    if (timersRef.current.has(id)) {
+      clearTimeout(timersRef.current.get(id));
+      timersRef.current.delete(id);
+    }
+  }, []);
+
+  const startExitAnimation = useCallback((id) => {
+    dispatch({ type: 'START_EXIT_ANIMATION', payload: id });
+    
+    const exitTimer = setTimeout(() => {
+      removeToast(id);
+    }, 400);
+    
+    timersRef.current.set(`exit_${id}`, exitTimer);
+  }, [removeToast]);
+
+  const scheduleAutoDismiss = useCallback((id, duration) => {
+    if (duration <= 0) return;
+    
+    const timer = setTimeout(() => {
+      startExitAnimation(id);
+    }, duration);
+    
+    timersRef.current.set(id, timer);
+  }, [startExitAnimation]);
+
+  const pauseAutoDismiss = useCallback((id) => {
+    if (timersRef.current.has(id)) {
+      clearTimeout(timersRef.current.get(id));
+      timersRef.current.delete(id);
+    }
   }, []);
 
   const toast = useCallback((message, options = {}) => {
@@ -43,18 +136,17 @@ export const ToastProvider = ({ children }) => {
       type: options.type || 'default',
       duration: options.duration !== undefined ? options.duration : 3000,
       position: options.position || 'top-right',
+      title: options.title || '',
     };
 
     dispatch({ type: 'ADD_TOAST', payload: toastConfig });
 
     if (toastConfig.duration > 0) {
-      setTimeout(() => {
-        removeToast(id);
-      }, toastConfig.duration);
+      scheduleAutoDismiss(id, toastConfig.duration);
     }
 
     return id;
-  }, [removeToast]);
+  }, [scheduleAutoDismiss]);
 
   const success = useCallback((message, options = {}) => {
     return toast(message, { ...options, type: 'success' });
@@ -74,11 +166,30 @@ export const ToastProvider = ({ children }) => {
 
   const dismiss = useCallback((id) => {
     if (id) {
-      removeToast(id);
+      startExitAnimation(id);
     } else {
-      state.toasts.forEach(toast => removeToast(toast.id));
+      state.toasts.forEach(toast => startExitAnimation(toast.id));
     }
-  }, [removeToast, state.toasts]);
+  }, [startExitAnimation, state.toasts]);
+
+  const updateToastLayout = useCallback((layouts) => {
+    dispatch({ type: 'UPDATE_ALL_TOASTS_LAYOUT', payload: { layouts } });
+  }, []);
+
+  const updateToastAnimation = useCallback((id, updates) => {
+    dispatch({ type: 'UPDATE_TOAST_ANIMATION', payload: { id, updates } });
+  }, []);
+
+  const setHoveredToast = useCallback((id) => {
+    hoveredToastRef.current = id;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach(timer => clearTimeout(timer));
+      timersRef.current.clear();
+    };
+  }, []);
 
   const value = {
     toasts: state.toasts,
@@ -88,6 +199,13 @@ export const ToastProvider = ({ children }) => {
     warning,
     info,
     dismiss,
+    removeToast,
+    startExitAnimation,
+    scheduleAutoDismiss,
+    pauseAutoDismiss,
+    updateToastLayout,
+    updateToastAnimation,
+    setHoveredToast,
   };
 
   return (
