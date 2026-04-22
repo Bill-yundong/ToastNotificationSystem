@@ -96,7 +96,7 @@ function App() {
           <div className="hero-content">
             <h1>Toast 通知系统</h1>
             <p>
-              一个功能完善的全局通知组件，支持函数式调用、自动堆叠、<br/>
+              一个功能完善的全局通知组件，支持函数式调用、自动堆叠、
               Portal 渲染（脱离父级 DOM 流）、平滑动画和自动倒计时销毁。
             </p>
           </div>

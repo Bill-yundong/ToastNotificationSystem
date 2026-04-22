@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useRef, useEffect } from 'react';
+import CONFIG from './ToastScheduler';
 
 const ToastContext = createContext(null);
 
@@ -92,6 +93,50 @@ export const ToastProvider = ({ children }) => {
   const [state, dispatch] = useReducer(toastReducer, { toasts: [] });
   const timersRef = useRef(new Map());
   const hoveredToastRef = useRef(null);
+  const queueRef = useRef([]);
+  const isProcessingRef = useRef(false);
+  const lastEnterTimeRef = useRef(0);
+
+  const processQueue = useCallback(() => {
+    if (queueRef.current.length === 0) {
+      isProcessingRef.current = false;
+      return;
+    }
+
+    const now = Date.now();
+    const timeSinceLastEnter = now - lastEnterTimeRef.current;
+    const enterInterval = CONFIG.enterInterval || 150;
+
+    if (timeSinceLastEnter < enterInterval) {
+      const delay = enterInterval - timeSinceLastEnter;
+      const queueTimer = setTimeout(() => {
+        processQueue();
+      }, delay);
+      timersRef.current.set('queue_processor', queueTimer);
+      return;
+    }
+
+    const { id, config } = queueRef.current.shift();
+    
+    dispatch({ type: 'ADD_TOAST', payload: config });
+    lastEnterTimeRef.current = Date.now();
+
+    if (config.duration > 0) {
+      const dismissTimer = setTimeout(() => {
+        startExitAnimation(id);
+      }, config.duration);
+      timersRef.current.set(id, dismissTimer);
+    }
+
+    if (queueRef.current.length > 0) {
+      const nextTimer = setTimeout(() => {
+        processQueue();
+      }, enterInterval);
+      timersRef.current.set('queue_processor', nextTimer);
+    } else {
+      isProcessingRef.current = false;
+    }
+  }, []);
 
   const removeToast = useCallback((id) => {
     dispatch({ type: 'REMOVE_TOAST', payload: id });
@@ -106,7 +151,7 @@ export const ToastProvider = ({ children }) => {
     
     const exitTimer = setTimeout(() => {
       removeToast(id);
-    }, 400);
+    }, CONFIG.exitAnimationDuration);
     
     timersRef.current.set(`exit_${id}`, exitTimer);
   }, [removeToast]);
@@ -128,7 +173,7 @@ export const ToastProvider = ({ children }) => {
     }
   }, []);
 
-  const toast = useCallback((message, options = {}) => {
+  const enqueueToast = useCallback((message, options = {}) => {
     const id = ++toastIdCounter;
     const toastConfig = {
       id,
@@ -139,14 +184,36 @@ export const ToastProvider = ({ children }) => {
       title: options.title || '',
     };
 
-    dispatch({ type: 'ADD_TOAST', payload: toastConfig });
+    const now = Date.now();
+    const timeSinceLastEnter = now - lastEnterTimeRef.current;
+    const enterInterval = CONFIG.enterInterval || 150;
 
-    if (toastConfig.duration > 0) {
-      scheduleAutoDismiss(id, toastConfig.duration);
+    if (timeSinceLastEnter >= enterInterval && !isProcessingRef.current) {
+      dispatch({ type: 'ADD_TOAST', payload: toastConfig });
+      lastEnterTimeRef.current = Date.now();
+      
+      if (toastConfig.duration > 0) {
+        scheduleAutoDismiss(id, toastConfig.duration);
+      }
+    } else {
+      queueRef.current.push({ id, config: toastConfig });
+      
+      if (!isProcessingRef.current) {
+        isProcessingRef.current = true;
+        const delay = Math.max(0, enterInterval - timeSinceLastEnter);
+        const queueTimer = setTimeout(() => {
+          processQueue();
+        }, delay);
+        timersRef.current.set('queue_processor', queueTimer);
+      }
     }
 
     return id;
-  }, [scheduleAutoDismiss]);
+  }, [scheduleAutoDismiss, processQueue]);
+
+  const toast = useCallback((message, options = {}) => {
+    return enqueueToast(message, options);
+  }, [enqueueToast]);
 
   const success = useCallback((message, options = {}) => {
     return toast(message, { ...options, type: 'success' });
